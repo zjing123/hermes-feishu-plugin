@@ -112,7 +112,28 @@ hermes-feishu-plugin/
 
 ## 安装方式
 
-### 方式一：作为 Hermes 目录插件安装
+### 推荐：hermes plugins install（官方插件管理器）
+
+一条命令完成 clone、依赖解析、启用与网关热重载：
+
+```bash
+hermes plugins install https://github.com/zjing123/hermes-feishu-plugin.git
+hermes plugins enable hermes_feishu_plugin   # 非交互环境下补跑：准备依赖并发布
+```
+
+说明：
+
+- 依赖会安装进 Hermes 管理的隔离环境（Python 3.14 venv），不污染系统 Python
+- 非交互终端（cron / 脚本）下 install 会跳过依赖安装，必须补跑 `enable` 完成发布
+- 更新：`hermes plugins remove hermes_feishu_plugin` 后重新 install；或对 pinned 安装使用 `--ref <commit>`
+
+### 方式二：本地目录插件（开发模式）
+
+在仓库根目录执行：
+
+```bash
+python3 install.py
+```
 
 在仓库根目录执行：
 
