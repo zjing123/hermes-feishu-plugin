@@ -14,15 +14,28 @@ LEGACY_LINK_NAMES = ("hermes-feishu-plugin",)
 LEGACY_PLUGIN_DIR_NAMES = ("runtime_patches",)
 STARTUP_PTH_NAME = "hermes_feishu_plugin_startup.pth"
 SITECUSTOMIZE_NAME = "sitecustomize.py"
-# The .pth may execute in any Hermes-managed Python env (e.g. the bundled
-# 3.14 toolchain) where this package is NOT pip-installed. Point sys.path at
-# the plugin checkout so the import resolves everywhere instead of raising
-# ModuleNotFoundError at every CLI invocation.
-STARTUP_IMPORT_LINE = (
-    "import sys, pathlib; "
-    "sys.path.insert(0, str(pathlib.Path.home() / '.hermes' / 'plugins' / 'hermes_feishu_plugin' / 'src')); "
-    "import hermes_feishu_plugin.startup\n"
-)
+# The loader may execute in an env where this package is not importable (the
+# .pth lands in a site-packages, the package lives in the plugin checkout), so
+# the src dir is injected into sys.path before the import. It is resolved from
+# the plugin root at write time — a hardcoded ~/.hermes/plugins/<name> breaks
+# for a renamed link, a profile-scoped install, or a checkout kept elsewhere.
+# Environments that never serve the gateway: a loader file there only executed
+# plugin code inside unrelated interpreters (one ModuleNotFoundError per start).
+_NON_GATEWAY_ENV_FRAGMENTS = (".hermes/tools", ".hermes/installs")
+
+
+def _hermes_venv_lib() -> Path:
+    """The venv that runs the gateway. Resolved per call: HOME is patchable."""
+    return Path.home() / ".hermes" / "hermes-agent" / "venv" / "lib"
+
+
+def _startup_import_line(plugin_root: Path) -> str:
+    """`.pth` / sitecustomize body that bootstraps the early patch loader."""
+    src_dir = (plugin_root / "src").resolve()
+    return (
+        f"import sys; sys.path.insert(0, {str(src_dir)!r}); "
+        "import hermes_feishu_plugin.startup\n"
+    )
 INSTALL_IGNORE_PATTERNS = (
     ".git",
     "__pycache__",
@@ -96,9 +109,10 @@ def _iter_site_package_dirs() -> list[Path]:
 
     for raw_path in site.getsitepackages():
         path = Path(raw_path)
-        add(path)
+        if not any(fragment in path.as_posix() for fragment in _NON_GATEWAY_ENV_FRAGMENTS):
+            add(path)
 
-    hermes_venv_lib = Path.home() / ".hermes" / "hermes-agent" / "venv" / "lib"
+    hermes_venv_lib = _hermes_venv_lib()
     if hermes_venv_lib.exists():
         for path in sorted(hermes_venv_lib.glob("python*/site-packages")):
             add(path)
@@ -106,16 +120,52 @@ def _iter_site_package_dirs() -> list[Path]:
     return paths
 
 
-def _write_startup_loader(plugins_root: Path) -> list[str]:
+def _remove_stale_startup_loaders(keep: list[Path]) -> list[str]:
+    """Delete our loader from envs that no longer get one.
+
+    Only a file recognisably ours (it imports the startup module) is touched, so
+    an unrelated file of the same name is never removed.
+    """
+    keep_keys = {path.resolve() for path in keep}
+    home = Path.home() / ".hermes"
+    candidates: list[Path] = []
+    for root, patterns in (
+        (home / "tools", ("*/lib/python*/site-packages",)),
+        (home / "installs", ("*/environments/*/venv/lib/python*/site-packages",)),
+    ):
+        if not root.exists():
+            continue
+        for pattern in patterns:
+            candidates.extend(root.glob(pattern))
+
+    removed: list[str] = []
+    for site_dir in candidates:
+        pth_path = site_dir / STARTUP_PTH_NAME
+        try:
+            if not pth_path.is_file() or pth_path.parent.resolve() in keep_keys:
+                continue
+            if "hermes_feishu_plugin.startup" in pth_path.read_text(encoding="utf-8", errors="replace"):
+                pth_path.unlink()
+                removed.append(str(pth_path))
+        except OSError:  # an unreadable env is not fatal
+            logger.debug("hermes_feishu_plugin: could not clean up %s", pth_path)
+    return removed
+
+
+def _write_startup_loader(plugins_root: Path, plugin_root: Path) -> list[str]:
+    import_line = _startup_import_line(plugin_root)
     synced: list[str] = []
     sitecustomize_path = plugins_root / SITECUSTOMIZE_NAME
-    sitecustomize_path.write_text(STARTUP_IMPORT_LINE, encoding="utf-8")
+    sitecustomize_path.write_text(import_line, encoding="utf-8")
     synced.append(str(sitecustomize_path))
 
-    for site_dir in _iter_site_package_dirs():
+    keep = _iter_site_package_dirs()
+    for site_dir in keep:
         pth_path = site_dir / STARTUP_PTH_NAME
-        pth_path.write_text(STARTUP_IMPORT_LINE, encoding="utf-8")
+        pth_path.write_text(import_line, encoding="utf-8")
         synced.append(str(pth_path))
+
+    synced.extend(_remove_stale_startup_loaders(keep))
     return synced
 
 
@@ -189,7 +239,7 @@ def sync_profile_plugin_links(*, plugin_name: str = PLUGIN_LINK_NAME) -> list[st
         _create_plugin_link(plugins_dir, plugin_dir, plugin_name)
         synced.append(scope)
 
-    _write_startup_loader(root / "plugins")
+    _write_startup_loader(root / "plugins", plugin_dir)
     return synced
 
 

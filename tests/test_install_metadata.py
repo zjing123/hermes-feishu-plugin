@@ -59,9 +59,54 @@ def test_sync_profile_plugin_links_creates_root_and_profile_symlinks(tmp_path, m
         assert (default_link / "plugin.yaml").read_text(encoding="utf-8") == "name: hermes_feishu_plugin\n"
     assert not legacy_link.exists()
     assert not legacy_runtime_plugin.exists()
-    assert (root_plugins / "sitecustomize.py").read_text(encoding="utf-8") == "import hermes_feishu_plugin.startup\n"
-    assert (tmp_path / "site-packages" / "hermes_feishu_plugin_startup.pth").exists()
-    assert (hermes_site_packages / "hermes_feishu_plugin_startup.pth").exists()
+    # Behaviour, not a frozen literal: the loader must point sys.path at this
+    # checkout's src dir before importing the early startup module.
+    loader = (root_plugins / "sitecustomize.py").read_text(encoding="utf-8")
+    assert "hermes_feishu_plugin.startup" in loader
+    assert str((repo_root / "src").resolve()) in loader
+    assert (tmp_path / "site-packages" / "hermes_feishu_plugin_startup.pth").read_text(
+        encoding="utf-8") == loader
+    assert (hermes_site_packages / "hermes_feishu_plugin_startup.pth").read_text(
+        encoding="utf-8") == loader
+
+
+def test_startup_loader_skips_and_cleans_non_gateway_envs(tmp_path, monkeypatch) -> None:
+    """The early loader belongs in the gateway venv only.
+
+    Writing it into the bundled toolchain / PM environments executed plugin code
+    inside interpreters that never serve Feishu, one ModuleNotFoundError per
+    start — those files must be skipped and any stale one removed.
+    """
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / "plugin.yaml").write_text("name: hermes_feishu_plugin\n", encoding="utf-8")
+    (repo_root / "__init__.py").write_text("", encoding="utf-8")
+
+    home_root = tmp_path / "home"
+    hermes_root = home_root / ".hermes"
+    root_plugins = hermes_root / "plugins"
+    root_plugins.mkdir(parents=True)
+    hermes_site_packages = hermes_root / "hermes-agent" / "venv" / "lib" / "python3.11" / "site-packages"
+    hermes_site_packages.mkdir(parents=True)
+    tools_site_packages = hermes_root / "tools" / "python-3.14" / "lib" / "python3.14" / "site-packages"
+    tools_site_packages.mkdir(parents=True)
+    pm_site_packages = (hermes_root / "installs" / "abc123" / "environments" / "def456"
+                        / "venv" / "lib" / "python3.14" / "site-packages")
+    pm_site_packages.mkdir(parents=True)
+
+    stale = "import hermes_feishu_plugin.startup\n"
+    for site_dir in (tools_site_packages, pm_site_packages):
+        (site_dir / install_module.STARTUP_PTH_NAME).write_text(stale, encoding="utf-8")
+
+    monkeypatch.setattr(install_module, "_resolve_plugin_root", lambda: repo_root)
+    monkeypatch.setattr(install_module.Path, "home", lambda: home_root)
+    monkeypatch.setattr(install_module.site, "getsitepackages", lambda: [str(tools_site_packages)])
+
+    install_module.sync_profile_plugin_links()
+
+    assert (hermes_site_packages / install_module.STARTUP_PTH_NAME).is_file()
+    assert not (tools_site_packages / install_module.STARTUP_PTH_NAME).exists()
+    assert not (pm_site_packages / install_module.STARTUP_PTH_NAME).exists()
 
 
 def test_project_metadata_declares_directory_plugin_and_entrypoint_support() -> None:
