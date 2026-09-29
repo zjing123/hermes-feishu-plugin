@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import logging
 import shutil
 import site
+
+logger = logging.getLogger(__name__)
 
 PLUGIN_LINK_NAME = "hermes_feishu_plugin"
 LEGACY_LINK_NAMES = ("hermes-feishu-plugin",)
@@ -127,8 +130,23 @@ def _create_plugin_link(plugins_dir: Path, plugin_dir: Path, plugin_name: str) -
     return link_path
 
 
+def _same_location(a: Path, b: Path) -> bool:
+    """True when both paths denote the same place (symlink-loop safe)."""
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:  # ELOOP from an existing self-referential link
+        return False
+
+
 def sync_profile_plugin_links(*, plugin_name: str = PLUGIN_LINK_NAME) -> list[str]:
-    """Ensure the plugin is linked into root and profile plugin directories."""
+    """Ensure the plugin is linked into root and profile plugin directories.
+
+    Nothing here may delete a real plugin directory. ``hermes plugins install``
+    puts a git clone AT ``<plugins>/<name>`` and imports the plugin from it, so
+    ``plugin_dir`` IS ``link_path``; the earlier unconditional
+    ``shutil.rmtree(link_path)`` then deleted the install and replaced it with a
+    symlink pointing at itself (an ELOOP that breaks every later access).
+    """
     plugin_dir = _resolve_plugin_root()
     root = Path.home() / ".hermes"
     synced: list[str] = []
@@ -139,17 +157,26 @@ def sync_profile_plugin_links(*, plugin_name: str = PLUGIN_LINK_NAME) -> list[st
         _remove_legacy_plugin_dirs(plugins_dir)
 
         link_path = plugins_dir / plugin_name
+
+        # Already in place — either the directory plugin itself (plugin_dir IS
+        # link_path) or the symlink this function created on an earlier run.
+        if _same_location(link_path, plugin_dir):
+            synced.append(scope)
+            continue
+
         if link_path.is_symlink():
-            if link_path.resolve() == plugin_dir:
-                synced.append(scope)
-                continue
             link_path.unlink()
 
         if link_path.exists():
-            if link_path.is_dir():
-                shutil.rmtree(link_path)
-            else:
-                link_path.unlink()
+            # A real directory under someone else's name is not ours to delete:
+            # Hermes's installer owns this path. Refuse loudly instead of
+            # destroying an install.
+            logger.warning(
+                "hermes_feishu_plugin: %s exists as a real directory; leaving it "
+                "untouched (remove it manually to let the plugin link %s)",
+                link_path, plugin_dir,
+            )
+            continue
 
         _create_plugin_link(plugins_dir, plugin_dir, plugin_name)
         synced.append(scope)
