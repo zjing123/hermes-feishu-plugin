@@ -14,7 +14,15 @@ LEGACY_LINK_NAMES = ("hermes-feishu-plugin",)
 LEGACY_PLUGIN_DIR_NAMES = ("runtime_patches",)
 STARTUP_PTH_NAME = "hermes_feishu_plugin_startup.pth"
 SITECUSTOMIZE_NAME = "sitecustomize.py"
-STARTUP_IMPORT_LINE = "import hermes_feishu_plugin.startup\n"
+# The .pth may execute in any Hermes-managed Python env (e.g. the bundled
+# 3.14 toolchain) where this package is NOT pip-installed. Point sys.path at
+# the plugin checkout so the import resolves everywhere instead of raising
+# ModuleNotFoundError at every CLI invocation.
+STARTUP_IMPORT_LINE = (
+    "import sys, pathlib; "
+    "sys.path.insert(0, str(pathlib.Path.home() / '.hermes' / 'plugins' / 'hermes_feishu_plugin' / 'src')); "
+    "import hermes_feishu_plugin.startup\n"
+)
 INSTALL_IGNORE_PATTERNS = (
     ".git",
     "__pycache__",

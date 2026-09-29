@@ -8,6 +8,11 @@
 - 你希望保留 Hermes 官方推荐的 `plugin.yaml + __init__.py` 目录插件形态
 - 你需要同时支持本地目录接入、`pip` 分发，以及面向公开仓库的 GitHub / npm 发布链路
 
+## 近期修复（2026-09-29）
+
+- **修复 .pth 启动钩子跨环境报错**：`install.py` 会向所有 Hermes Python 环境（含捆绑的 Python 3.14 工具链）写入 `.pth` 启动钩子，但模块未必安装在这些环境中，导致每次执行 `hermes` 命令时输出 `ModuleNotFoundError: No module named 'hermes_feishu_plugin'`。现在 `.pth` 会先将 `~/.hermes/plugins/hermes_feishu_plugin/src` 注入 `sys.path` 再导入，任何环境均可自举，无需 pip 安装。
+- **修复安装器自指 symlink（ELOOP）**：`hermes plugins install` 会把仓库 clone 到 `<plugins>/<name>`，旧版安装逻辑会误删该真实目录并替换成指向自身的符号链接。现已改为检测到真实目录时保持不动。
+
 ## 项目定位
 
 这个仓库做的是 **Hermes 飞书通道插件**，不是 Hermes 核心分叉，也不是把 OpenClaw 的 Node 插件直接硬塞进 Hermes。
