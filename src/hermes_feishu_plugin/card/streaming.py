@@ -448,15 +448,27 @@ def patch_streaming_cards() -> bool:
     if getattr(original_send_or_edit, "__hermes_feishu_plugin_wrapped__", False):
         return True
 
-    async def wrapped_send_or_edit(self: Any, text: str, *, finalize: bool = False) -> bool:
+    async def wrapped_send_or_edit(
+        self: Any, text: str, *, finalize: bool = False, is_turn_final: bool = True
+    ) -> bool:
+        """Signature must match Hermes' stream-consumer contract.
+
+        ``stream_consumer_transport._send_or_edit`` is called with
+        ``is_turn_final`` (``tick.got_done``): True only for the turn's own final
+        answer, False for a ``finalize=True`` segment break at a tool boundary
+        (a preamble). Accepting the keyword is also what keeps this wrapper
+        loadable at all — with the old two-argument signature every chunk raised
+        ``TypeError`` and killed the whole stream consumer loop, so no streaming
+        card was ever produced.
+        """
         cleaned = self._clean_for_display(text)
         if not cleaned.strip():
             return True
 
         if not is_feishu_adapter(self.adapter):
-            return await original_send_or_edit(self, text, finalize=finalize)
+            return await original_send_or_edit(self, text, finalize=finalize, is_turn_final=is_turn_final)
         if not should_stream(self.adapter, self.chat_id):
-            return await original_send_or_edit(self, text, finalize=finalize)
+            return await original_send_or_edit(self, text, finalize=finalize, is_turn_final=is_turn_final)
 
         expected_generation = _resolve_expected_generation(self.adapter, self.chat_id, owner=self)
         if not _generation_matches(self.adapter, self.chat_id, expected_generation):
@@ -480,7 +492,10 @@ def patch_streaming_cards() -> bool:
             return True
 
         visible_text, inferred_is_final = strip_cursor(cleaned, self.cfg.cursor)
-        is_final = bool(finalize or inferred_is_final)
+        # Only the turn's final answer closes the card: a segment break at a tool
+        # boundary finalizes the *transport* segment, not the card, and closing
+        # there left the card stuck in its running state (#1).
+        is_final = is_turn_final and bool(finalize or inferred_is_final)
         try:
             message_id = await _ensure_card_created(
                 self.adapter,
@@ -490,7 +505,7 @@ def patch_streaming_cards() -> bool:
                 expected_generation=expected_generation,
             )
             if not message_id:
-                return await original_send_or_edit(self, text, finalize=finalize)
+                return await original_send_or_edit(self, text, finalize=finalize, is_turn_final=is_turn_final)
 
             self._message_id = message_id
             remember_display_text(self.adapter, self.chat_id, visible_text)
@@ -501,7 +516,7 @@ def patch_streaming_cards() -> bool:
                     visible_text,
                     expected_generation=expected_generation,
                 ):
-                    return await original_send_or_edit(self, text, finalize=finalize)
+                    return await original_send_or_edit(self, text, finalize=finalize, is_turn_final=is_turn_final)
             else:
                 await _flush_answer(
                     self.adapter,
@@ -515,7 +530,7 @@ def patch_streaming_cards() -> bool:
         except Exception as exc:
             logger.warning("hermes_feishu_plugin CardKit streaming error: %s", exc)
             if not self._message_id:
-                return await original_send_or_edit(self, text, finalize=finalize)
+                return await original_send_or_edit(self, text, finalize=finalize, is_turn_final=is_turn_final)
             self._already_sent = True
             return False
 
